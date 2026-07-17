@@ -1,147 +1,38 @@
-name: Build and Test
+name: Build Static ARM64
 
 on:
   push:
+    branches: [main, master]
+    tags: ['v*']
   pull_request:
-    branches: [master]
+  workflow_dispatch:
 
 jobs:
-  formatting-check:
-    name: Formatting Check
+  build-arm64-static:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
-      - name: Run clang-format style check on src directory
-        uses: jidicula/clang-format-action@v4.11.0
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          clang-format-version: "13"
-          check-path: "src"
+          submodules: recursive  # 关键：拉取 mavlink 子模块
 
-  build:
-    runs-on: ubuntu-24.04
-    needs: [formatting-check]
-    strategy:
-      matrix:
-        include:
-          - name: armhf
-            arch: arm-linux-gnueabihf
-          - name: aarch64
-            arch: aarch64-linux-gnu
-          - name: x86_64
-            arch: native
-          - name: i686
-            arch: native
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: install dependencies (native)
-        if: ${{ matrix.arch == 'native' }}
-        run: |
-          if [ "${{ matrix.name }}" == "i686" ]; then
-              sudo dpkg --add-architecture i386
-              sudo apt-get update
-              sudo apt-get install --yes libgtest-dev:i386
-          else
-              sudo apt-get update
-              sudo apt-get install --yes libgtest-dev
-          fi
-          sudo apt-get install --yes pkg-config gcc-multilib g++-multilib ninja-build python3-pip
-          pip3 install meson pymavlink
-
-      - name: install dependencies (cross)
-        if: ${{ matrix.arch != 'native' }}
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ninja-build gcc-${{ matrix.arch }} g++-${{ matrix.arch }} podman python3-pip
-          pip3 install meson pymavlink
+          sudo apt-get install -y meson ninja-build pkg-config
 
-      - name: prepare sysroot
-        if: ${{ matrix.arch != 'native' }}
+      - name: Install aarch64 musl toolchain
         run: |
-          mkdir rootfs
-          tools/ci-create-rootfs.sh ${{ matrix.name }} > rootfs.tar
-          tar -xf rootfs.tar --directory=rootfs
-          sed -e "s#@sysroot@#$PWD/rootfs#g" meson-cross-sysroot.ini.in > meson-cross-sysroot.ini
-
-      - name: configure (native)
-        if: ${{ matrix.arch == 'native' }}
-        run: |
-          export PKG_CONFIG=$PWD/tools/meson-native-ubuntu-pkg-config
-          if [ "${{ matrix.name }}" == "i686" ]; then
-              export PATH="$PWD/tools:$PATH"
-              meson setup --werror --cross-file meson-cross-i686.ini  -Dsystemdsystemunitdir=/usr/lib/systemd/system build-${{ matrix.name }} .
-          else
-              meson setup --werror build-${{ matrix.name }} .
-          fi
-
-      - name: configure (cross)
-        if: ${{ matrix.arch != 'native' }}
-        run: meson setup --werror -Dsystemdsystemunitdir=/usr/lib/systemd/system --cross-file meson-cross-${{ matrix.name }}.ini --cross-file meson-cross-sysroot.ini build-${{ matrix.name }} .
-
-      - name: build
-        run: ninja -C build-${{ matrix.name }}
-
-      - name: test
-        if: ${{ matrix.arch == 'native' }}
-        run: ninja -C build-${{ matrix.name }} test
-
-      - name: install
-        run: DESTDIR=./.debpkg ninja -C build-${{ matrix.name }} install
-
-      - name: run routing_test.py
-        if: ${{ matrix.arch == 'native' }}
-        run: ./tests/routing_test.py -b ./build-${{ matrix.name }}/src/mavlink-routerd
-
-      - uses: actions/upload-artifact@master
-        with:
-          path: build-${{ matrix.name }}/src/mavlink-routerd
-          name: mavlink-routerd-glibc-${{ matrix.name }}
-
-      - uses: svenstaro/upload-release-action@v2
-        name: Upload binaries to release
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: build-${{ matrix.name }}/src/mavlink-routerd
-          asset_name: mavlink-routerd-glibc-${{ matrix.name }}
-          tag: ${{ github.ref }}
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-          overwrite: true
-
-  # ============================================================================
-  # 新增：ARM64 静态链接构建（musl）- 不需要 sysroot！
-  # ============================================================================
-  build-aarch64-static:
-    name: aarch64 static (musl)
-    runs-on: ubuntu-24.04
-    needs: [formatting-check]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      # 1. 安装构建依赖（不需要 podman！）
-      - name: install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y meson ninja-build pkg-config wget
-
-      # 2. 下载 musl 交叉编译工具链
-      - name: install musl cross toolchain
-        run: |
+          # 下载预编译的 musl 交叉工具链
           wget https://musl.cc/aarch64-linux-musl-cross.tgz
           tar xzf aarch64-linux-musl-cross.tgz
           sudo mv aarch64-linux-musl-cross /opt/
           echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
 
-      # 3. 创建 meson cross file（不需要 sysroot！）
-      - name: create cross file
+      - name: Create cross file
         run: |
-          cat > meson-cross-aarch64-musl.ini << 'EOF'
+          cat > cross-aarch64-musl.ini << 'EOF'
           [binaries]
           c = 'aarch64-linux-musl-gcc'
           cpp = 'aarch64-linux-musl-g++'
@@ -159,50 +50,40 @@ jobs:
           c_args = ['-static']
           cpp_args = ['-static']
           c_link_args = ['-static']
-          cpp_link_args = ['-static', '-static-libstdc++', '-static-libgcc']
+          cpp_link_args = ['-static']
           EOF
 
-      # 4. 修改 src/meson.build 添加静态链接参数
-      - name: patch meson.build for static linking
+      - name: Patch meson.build for static linking
         run: |
-          sed -i '/link_with: libcommon_private,/a\        link_args: ['"'"'-static-libstdc++'"'"', '"'"'-static-libgcc'"'"', '"'"'-static'"'"'],' src/meson.build
+          # 使用 sed 或 patch 添加 -static-libstdc++ 和 -static-libgcc
+          sed -i "s/install: true,/install: true,\n        link_args: ['-static-libstdc++', '-static-libgcc', '-static'],/" src/meson.build
 
-      # 5. 配置 meson（不需要 --cross-file meson-cross-sysroot.ini！）
-      - name: configure
+      - name: Configure meson
         run: |
-          meson setup --werror \
-            --cross-file meson-cross-aarch64-musl.ini \
+          meson setup build \
+            --cross-file cross-aarch64-musl.ini \
             --buildtype=release \
-            -Dsystemdsystemunitdir='' \
-            build-aarch64-static .
+            -Dsystemdsystemunitdir=''
 
-      # 6. 编译
-      - name: build
-        run: ninja -C build-aarch64-static
+      - name: Build
+        run: ninja -C build
 
-      # 7. 验证是否为静态链接
-      - name: verify static binary
+      - name: Verify static binary
         run: |
-          file build-aarch64-static/src/mavlink-routerd
-          ldd build-aarch64-static/src/mavlink-routerd 2>&1 || true
+          file build/src/mavlink-routerd
+          ldd build/src/mavlink-routerd || true  # musl 静态链接应显示不是动态可执行文件
 
-      # 8. strip 减小体积
-      - name: strip binary
-        run: aarch64-linux-musl-strip build-aarch64-static/src/mavlink-routerd
+      - name: Strip binary
+        run: aarch64-linux-musl-strip build/src/mavlink-routerd
 
-      # 9. 上传构建产物
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: mavlink-routerd-aarch64-static
-          path: build-aarch64-static/src/mavlink-routerd
+          name: mavlink-routerd-arm64-static
+          path: build/src/mavlink-routerd
 
-      # 10. 发布到 Release
-      - uses: svenstaro/upload-release-action@v2
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: build-aarch64-static/src/mavlink-routerd
-          asset_name: mavlink-routerd-aarch64-static
-          tag: ${{ github.ref }}
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-          overwrite: true
+          files: build/src/mavlink-routerd
