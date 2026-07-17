@@ -1,8 +1,11 @@
-name: Build and Test 2
+name: Build Static ARM64
 
 on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
-name: Build Static ARM64
 
 jobs:
   build-arm64-static:
